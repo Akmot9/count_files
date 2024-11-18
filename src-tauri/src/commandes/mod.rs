@@ -1,12 +1,12 @@
 use serde::Serialize;
 use walkdir::WalkDir;
-use log::error;
+use log::{error, info};
 use std::path::Path;
 use tauri::{command, ipc::Channel};
 use crate::errors::SurimiError;
 
 #[command(async)]
-pub fn get_file_count(on_event: Channel<FileCountEvent>) -> Result<(), SurimiError> {
+pub fn get_file_count(on_event: Channel<FileCountEvent>) {
     let root_path = if cfg!(target_os = "windows") {
         Path::new("C:\\")
     } else {
@@ -14,10 +14,10 @@ pub fn get_file_count(on_event: Channel<FileCountEvent>) -> Result<(), SurimiErr
     };
 
     let mut file_count = 0;
-    let mut error_count = 0;
+    let mut last_reported_count = 0;
 
     for entry in WalkDir::new(root_path)
-        .follow_links(false) // Évite les cycles de liens symboliques
+        .follow_links(false)
         .into_iter()
     {
         match entry {
@@ -25,47 +25,43 @@ pub fn get_file_count(on_event: Channel<FileCountEvent>) -> Result<(), SurimiErr
                 if entry.file_type().is_file() {
                     file_count += 1;
 
-                    // Envoyer l'événement de progression
-                    on_event
-                        .send(FileCountEvent::Progress {
-                            count: file_count,
-                            current_path: entry.path().to_str().unwrap_or("unknown"),
-                            error: None,
-                            error_count: Some(error_count),
-                        })
-                        .map_err(|e| SurimiError::ChannelSendError(e.to_string()))?;
+                    // Échantillonnage : envoyer une mise à jour tous les 100 fichiers
+                    if file_count - last_reported_count >= 25_000 {
+                        last_reported_count = file_count;
+                        on_event
+                            .send(FileCountEvent::Progress {
+                                count: file_count,
+                                current_path: entry.path().to_str().unwrap_or("unknown"),
+                            })
+                            .unwrap_or_else(|e| {
+                                eprintln!("Failed to send progress event: {}", e);
+                            });
+                    }
                 }
             }
             Err(e) => {
-                error_count += 1;
-                let path = e.path().map(|p| p.display().to_string()).unwrap_or_else(|| "unknown".to_string());
-                let error_message = format!("Cannot access path: {}: {}", path, e);
-
-                // Log l'erreur
-                error!("{}", error_message);
-
-                // Envoyer l'événement avec l'erreur
+                let error_message = format!("Error accessing path: {}", e);
                 on_event
-                    .send(FileCountEvent::Progress {
-                        count: file_count,
-                        current_path: "unknown",
-                        error: Some(error_message),
-                        error_count: Some(error_count),
+                    .send(FileCountEvent::Error {
+                        message: error_message,
                     })
-                    .map_err(|e| SurimiError::ChannelSendError(e.to_string()))?;
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to send error event: {}", e);
+                    });
             }
         }
     }
 
-    // Envoyer l'événement de fin
+    // Envoyer un événement de fin
     on_event
         .send(FileCountEvent::Finished {
             total_count: file_count,
         })
-        .map_err(|e| SurimiError::ChannelSendError(e.to_string()))?;
-
-    Ok(())
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to send finished event: {}", e);
+        });
 }
+
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]
@@ -74,11 +70,13 @@ pub enum FileCountEvent<'a> {
     Progress {
         count: usize,
         current_path: &'a str,
-        error: Option<String>,
-        error_count: Option<usize>,
     },
     #[serde(rename_all = "camelCase")]
     Finished {
         total_count: usize,
+    },
+    #[serde(rename_all = "camelCase")]
+    Error {
+        message: String,
     },
 }

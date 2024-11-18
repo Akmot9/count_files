@@ -18,7 +18,7 @@
       <p>Total files: {{ fileCount }}</p>
     </div>
 
-    <!-- Message d'erreur -->
+    <!-- Dernière erreur -->
     <div v-if="error">
       <p class="error">Last error: {{ error }}</p>
     </div>
@@ -35,14 +35,18 @@ type FileCountEvent =
       data: {
         count: number;
         currentPath: string;
-        error: string | null;
-        errorCount: number | null;
       };
     }
   | {
       event: "finished";
       data: {
         totalCount: number;
+      };
+    }
+  | {
+      event: "error";
+      data: {
+        message: string;
       };
     };
 
@@ -74,13 +78,18 @@ export default defineComponent({
         const onEvent = new Channel<FileCountEvent>();
 
         onEvent.onmessage = (message) => {
-          if (message.event === "progress") {
-            this.currentCount = message.data.count;
-            this.error = message.data.error;
-            this.errorCount = message.data.errorCount ?? 0;
-          } else if (message.event === "finished") {
-            this.fileCount = message.data.totalCount;
-            this.loading = false;
+          switch (message.event) {
+            case "progress":
+              this.currentCount = message.data.count;
+              break;
+            case "finished":
+              this.fileCount = message.data.totalCount;
+              this.loading = false;
+              break;
+            case "error":
+              this.error = message.data.message; // Met à jour avec la dernière erreur
+              this.errorCount += 1; // Incrémente le compteur d'erreurs
+              break;
           }
         };
 
